@@ -1,0 +1,28 @@
+[project]
+name = "triton-muonadamw"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "torch",
+    "optuna",
+    "numpy",
+    "pandas",
+    "torchinfo",
+    "triton-windows",
+    "rich",
+    "tqdm",
+    "datasets>=5.0.1",
+    "tokenizers>=0.23.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda-build-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = {
+    index = "pytorch-cuda-build-cu128"
+}
