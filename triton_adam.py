@@ -3,6 +3,15 @@ import triton.language as tl
 
 import torch
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 1024}, num_warps=2),
+        triton.Config({'BLOCK_SIZE': 512}, num_warps=2),
+        triton.Config({'BLOCK_SIZE': 256}, num_warps=2),
+        triton.Config({'BLOCK_SIZE': 128}, num_warps=2),
+    ],
+    key=["N"],
+)
 @triton.jit
 def adamw_step(
     p_ptr,
@@ -12,19 +21,20 @@ def adamw_step(
     N: int,
     BLOCK_SIZE: tl.constexpr,
     lr: float,
-    weight_decay: float,
-    step: int,
+    weight_decay: tl.constexpr,
     bias1 ,
     bias2,
-    beta1: float = 0.9,
-    beta2: float = 0.99,
-    eps: float = 1e-8,
+    beta1: tl.constexpr = 0.9,
+    beta2: tl.constexpr = 0.99,
+    eps: tl.constexpr = 1e-8,
 ):
-    pid = tl.program_id(axis=0)
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
     cols = tl.arange(0, BLOCK_SIZE)
+    offset = pid_n * BLOCK_SIZE
 
-    ptrs = pid * N + cols
-    mask = cols < N
+    ptrs = pid_m * N + offset + cols
+    mask = offset + cols < N
 
     params = tl.load(p_ptr + ptrs, mask=mask, other=0.0)
     g = tl.load(g_ptr + ptrs, mask=mask, other=0.0)
@@ -50,7 +60,6 @@ def solve_adamw_step(
     m: torch.Tensor,
     v: torch.tensor,
     lr : float,
-    step: int,
     bias1,
     bias2,
     beta1: float,
@@ -65,10 +74,9 @@ def solve_adamw_step(
         v=v.unsqueeze(0)
 
     M, N = matrix.shape
-    BLOCK_SIZE = triton.next_power_of_2(N)
-    grid = (M,)
+    grid=lambda meta:(M,triton.cdiv(N,meta['BLOCK_SIZE']))
 
-    adamw_step[grid](matrix, gradient, m, v, N, BLOCK_SIZE, lr, weight_decay, step, bias1, bias2, beta1, beta2, eps )
+    adamw_step[grid](matrix, gradient, m, v, N=N, lr=lr, weight_decay=weight_decay, bias1=bias1, bias2=bias2, beta1=beta1, beta2=beta2, eps=eps)
 
 
 class TritonAdamW:
@@ -99,7 +107,6 @@ class TritonAdamW:
                 self.m[param],
                 self.v[param],
                 self.lr,
-                self.step_num,
                 1 - self.beta1 ** self.step_num,
                 1 - self.beta2 ** self.step_num,
                 self.beta1,
