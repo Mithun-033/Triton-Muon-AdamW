@@ -1,26 +1,27 @@
 import torch
 import torch.nn as nn
 from triton_adam import TritonAdamW
+import argparse
 
-model = nn.Sequential(
-    nn.Linear(16,128),
-    nn.LayerNorm(128),
+parser = argparse.ArgumentParser(description='Benchmark Triton AdamW vs PyTorch AdamW')
+parser.add_argument('--fused', action='store_true', help='Use fused AdamW in PyTorch')
+args = parser.parse_args()
+
+model=nn.Sequential(
+    nn.Linear(1024,4096),
+    nn.LayerNorm(4096),
     nn.ReLU(),
-    
-    nn.Linear(128,512),
-    nn.LayerNorm(512),
+    nn.Linear(4096,4096),
+    nn.LayerNorm(4096),
     nn.ReLU(),
-
-    nn.Linear(512,1024),
-    nn.LayerNorm(1024),
+    nn.Linear(4096,4096),
+    nn.LayerNorm(4096),
     nn.ReLU(),
+    nn.Linear(4096,1024),
+).cuda()
 
-    nn.Linear(1024,64),
-    nn.Linear(64,1)
-).to('cuda')
-
-X = torch.randn(1000, 16).to('cuda')
-Y = torch.randn(1000, 1).to('cuda')
+X = torch.randn(1000, 1024).to('cuda')
+Y = torch.randn(1000, 1024).to('cuda')
 import copy
 
 model_triton=model
@@ -40,7 +41,8 @@ pytorch_optimizer=torch.optim.AdamW(
     lr=1e-3,
     betas=(0.9,0.999),
     weight_decay=1e-4,
-    eps=1e-8
+    eps=1e-8,
+    fused = args.fused
 )
 
 def get_grads(model):
@@ -53,7 +55,7 @@ get_grads(model_triton)
 get_grads(model_pytorch)
 
 
-def benchmark_optimizer(model,optimizer,warmup=50,iterations=200):
+def benchmark_optimizer(model,optimizer,warmup=100,iterations=500):
     # Warmup
     for _ in range(warmup):
         optimizer.step()
@@ -76,10 +78,16 @@ def benchmark_optimizer(model,optimizer,warmup=50,iterations=200):
 
     return ms_per_step
 
+iterations = 10
+triton_ms = 0
+pytorch_ms = 0
 
-triton_ms=benchmark_optimizer(model_triton,triton_optimizer)
-pytorch_ms=benchmark_optimizer(model_pytorch,pytorch_optimizer)
+for _ in range(iterations):
+    triton_ms+=benchmark_optimizer(model_triton,triton_optimizer)
+    pytorch_ms+=benchmark_optimizer(model_pytorch,pytorch_optimizer)
 
+triton_ms/=iterations
+pytorch_ms/=iterations
 
 num_params=sum(p.numel() for p in model_triton.parameters())
 
