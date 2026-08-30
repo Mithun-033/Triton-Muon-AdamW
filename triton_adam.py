@@ -10,18 +10,20 @@ def adamw_step(
     m_ptr,
     v_ptr,
     N: int,
-    BLOCK_SIZE: int,
+    BLOCK_SIZE: tl.constexpr,
     lr: float,
     weight_decay: float,
     step: int,
-    beta1: int = 0.9,
-    beta2: int = 0.99,
+    bias1 ,
+    bias2,
+    beta1: float = 0.9,
+    beta2: float = 0.99,
     eps: float = 1e-8,
 ):
     pid = tl.program_id(axis=0)
     cols = tl.arange(0, BLOCK_SIZE)
 
-    ptrs = pid * N + tl.arange(BLOCK_SIZE)
+    ptrs = pid * N + cols
     mask = cols < N
 
     params = tl.load(p_ptr + ptrs, mask=mask, other=0.0)
@@ -31,8 +33,8 @@ def adamw_step(
 
     m_t = beta1 * m + (1 - beta1) * g
     v_t = beta2 * v + (1 - beta2) * (g * g)
-    m_c = m_t / (1 - beta1**step)
-    v_c = v_t / (1 - beta2**step)
+    m_c = m_t / bias1
+    v_c = v_t / bias2
 
     param_decay = (1 - lr * weight_decay) * params
     param_new = param_decay - lr * (m_c / (tl.sqrt(v_c) + eps))
@@ -49,16 +51,24 @@ def solve_adamw_step(
     v: torch.tensor,
     lr : float,
     step: int,
+    bias1,
+    bias2,
     beta1: float,
     beta2: float,
     weight_decay,
     eps : float
 ):
+    if matrix.ndim==1:
+        matrix=matrix.unsqueeze(0)
+        gradient=gradient.unsqueeze(0)
+        m=m.unsqueeze(0)
+        v=v.unsqueeze(0)
+
     M, N = matrix.shape
     BLOCK_SIZE = triton.next_power_of_2(N)
     grid = (M,)
 
-    adamw_step[grid](matrix, gradient, m, v, N, BLOCK_SIZE, lr, weight_decay, step, beta1, beta2, eps )
+    adamw_step[grid](matrix, gradient, m, v, N, BLOCK_SIZE, lr, weight_decay, step, bias1, bias2, beta1, beta2, eps )
 
 
 class TritonAdamW:
@@ -69,24 +79,29 @@ class TritonAdamW:
         self.lr = lr
         self.weight_decay = weight_decay
         self.eps = eps
-        self.step = 0
+        self.step_num = 0
         self.m = {}
         self.v = {}
 
         for param in self.model.parameters():
-            self.m[param] = torch.zeros_like(param)
-            self.v[param] = torch.zeros_like(param)
+            self.m[param] = torch.zeros_like(param, dtype = torch.float32)
+            self.v[param] = torch.zeros_like(param, dtype = torch.float32)
 
+    @torch.no_grad()
     def step(self):
-        self.step += 1
+        self.step_num += 1
         for param in self.model.parameters():
+            if param.grad is None:
+                continue
             solve_adamw_step(
                 param,
                 param.grad,
                 self.m[param],
                 self.v[param],
                 self.lr,
-                self.step,
+                self.step_num,
+                1 - self.beta1 ** self.step_num,
+                1 - self.beta2 ** self.step_num,
                 self.beta1,
                 self.beta2,
                 self.weight_decay,
