@@ -83,6 +83,7 @@ def ns_kernel_2(a_ptr,
         BLOCK_K ):
     '''
     A = X @ X.Transpose
+    A = (M,M)
     Compute out = bA + c(A @ A.Transpose)
     '''
     pid_m, pid_n = tl.program_id(axis = 0), tl.program_id(axis = 1)
@@ -97,7 +98,23 @@ def ns_kernel_2(a_ptr,
     acc = tl.zeros((BLOCK_M, BLOCK_M), dtype = tl.float32)
 
     for k in range(0,M,BLOCK_K):
-        ...
+        mask_k = k + offset_k < M
+        a = tl.load(a_ptrs, mask = (offset_m[:,None] < M) & mask_k[None,:], other = 0.0)
+        at = tl.load(at_ptrs, mask = (mask_k[:,None]) & (offset_n[None,:] < M), other = 0.0)
+
+        acc = tl.dot(a,at,acc)
+
+        a_ptrs += BLOCK_K * stride_ak
+        at_ptrs += BLOCK_K * stride_ak
+
+    A_ptrs = a_ptr+offset_m[:,None]*stride_am+offset_n[None,:]*stride_ak
+    A = tl.load(A_ptrs, mask = (offset_m[:,None] < M) & (offset_k[None,:] < M), other = 0.0)
+    out = b_coeff * A + c_coeff * acc
+
+    out_ptrs = out_ptr + offset_m[:,None] * stride_cm + offset_n[None,:] * stride_cn
+    out_mask = (offset_m[:,None] < M) & (offset_n[None,:] < M)
+
+    tl.store(out_ptrs, out, mask = out_mask)
 
 def solve_ns_kernel_2(matrix : torch.Tensor, b : float, c:float, out = torch.Tensor):
     M = matrix.shape[0]
