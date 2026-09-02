@@ -13,16 +13,18 @@ def ns_kernel_1(a_ptr,
         stride_cm,
         stride_cn,
         BLOCK_M : tl.constexpr,
-        BLOCK_K : tl.constexpr):
+        BLOCK_K : tl.constexpr,
+        GROUP_M : tl.constexpr):
     """
     Compute X @ X.transpose
     X.shape = (M,K)
     out.shape = (M,M)
     """
-    pid_m, pid_n = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(axis = 0)
 
-    offset_m = pid_m * BLOCK_M + tl.arange(0,BLOCK_M)
-    offset_n = pid_n * BLOCK_M + tl.arange(0,BLOCK_M)
+
+    offset_m = ...
+    offset_n = ...
     offset_k = tl.arange(0,BLOCK_K)
 
     a_ptrs = a_ptr + offset_m[:,None] * stride_am + offset_k[None,:] * stride_ak
@@ -51,7 +53,7 @@ def solve_ns_kernel_1(matrix: torch.Tensor, out: torch.Tensor):
     BLOCK_M = 64
     BLOCK_K = 32
     GROUP_M = 8
-    
+
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(M, BLOCK_M))
     ns_kernel_1[grid](
         a_ptr=matrix,
@@ -64,8 +66,59 @@ def solve_ns_kernel_1(matrix: torch.Tensor, out: torch.Tensor):
         stride_cn=out.stride(1),
         BLOCK_M=BLOCK_M,
         BLOCK_K=BLOCK_K,
+        GROUP_M = GROUP_M
     )
 
+@triton.jit
+def ns_kernel_2(a_ptr,
+        out_ptr,
+        b_coeff,
+        c_coeff,
+        M,
+        stride_am,
+        stride_ak,
+        stride_cm,
+        stride_cn,
+        BLOCK_M,
+        BLOCK_K ):
+    '''
+    A = X @ X.Transpose
+    Compute out = bA + c(A @ A.Transpose)
+    '''
+    pid_m, pid_n = tl.program_id(axis = 0), tl.program_id(axis = 1)
+
+    offset_m = BLOCK_M * pid_m + tl.arange(0,BLOCK_M)
+    offset_n = BLOCK_M * pid_n + tl.arange(0,BLOCK_M)
+    offset_k = tl.arange(0,BLOCK_K)
+
+    a_ptrs = a_ptr + offset_m[:,None] * stride_am + offset_k[None,:] * stride_ak
+    at_ptrs = a_ptr + offset_k[:,None] * stride_ak + offset_n[None,:] * stride_am
+
+    acc = tl.zeros((BLOCK_M, BLOCK_M), dtype = tl.float32)
+
+    for k in range(0,M,BLOCK_K):
+        ...
+
+def solve_ns_kernel_2(matrix : torch.Tensor, b : float, c:float, out = torch.Tensor):
+    M = matrix.shape[0]
+
+    BLOCK_M = 64
+    BLOCK_K = 32
+
+    grid = (triton.cdiv(M,BLOCK_M), triton.cdiv(M,BLOCK_M))
+    ns_kernel_2[grid](
+        a_ptr = matrix,
+        out_ptr = out,
+        b_coeff = b,
+        c_coeff = c,
+        M = M,
+        stride_am = matrix.stride(0),
+        stride_ak = matrix.stride(1),
+        stride_cm = out.stride(0),
+        stride_cn = out.stride(1),
+        BLOCK_M = BLOCK_M ,
+        BLOCK_K = BLOCK_K
+    )
 
 @triton.jit
 def muon_step(): ...
