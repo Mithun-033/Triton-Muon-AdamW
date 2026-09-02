@@ -21,10 +21,19 @@ def ns_kernel_1(a_ptr,
     out.shape = (M,M)
     """
     pid = tl.program_id(axis = 0)
+    num_pid_n = tl.cdiv(M, BLOCK_M)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_in_group = (GROUP_M * num_pid_n)
 
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
 
-    offset_m = ...
-    offset_n = ...
+    pid_m = first_pid_m + pid % group_size_m 
+    pid_n = (pid % num_pid_n) // group_size_m
+
+    offset_m = pid_m * BLOCK_M + tl.arange(0,BLOCK_M)
+    offset_n = pid_n * BLOCK_M + tl.arange(0,BLOCK_M)
     offset_k = tl.arange(0,BLOCK_K)
 
     a_ptrs = a_ptr + offset_m[:,None] * stride_am + offset_k[None,:] * stride_ak
@@ -79,14 +88,26 @@ def ns_kernel_2(a_ptr,
         stride_ak,
         stride_cm,
         stride_cn,
-        BLOCK_M,
-        BLOCK_K ):
+        BLOCK_M : tl.constexpr,
+        BLOCK_K : tl.constexpr,
+        GROUP_M : tl.constexpr ):
     '''
     A = X @ X.Transpose
     A = (M,M)
-    Compute out = bA + c(A @ A.Transpose)
+    out = bA + c(A @ A.Transpose)
+    out = (M,M)
     '''
-    pid_m, pid_n = tl.program_id(axis = 0), tl.program_id(axis = 1)
+    pid = tl.program_id(axis = 0)
+    num_pid_n = tl.cdiv(M, BLOCK_M)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_in_group = (GROUP_M * num_pid_n)
+
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+
+    pid_m = first_pid_m + pid % group_size_m 
+    pid_n = (pid % num_pid_n) // group_size_m
 
     offset_m = BLOCK_M * pid_m + tl.arange(0,BLOCK_M)
     offset_n = BLOCK_M * pid_n + tl.arange(0,BLOCK_M)
@@ -121,8 +142,9 @@ def solve_ns_kernel_2(matrix : torch.Tensor, b : float, c:float, out = torch.Ten
 
     BLOCK_M = 64
     BLOCK_K = 32
+    GROUP_M = 8
 
-    grid = (triton.cdiv(M,BLOCK_M), triton.cdiv(M,BLOCK_M))
+    grid = (triton.cdiv(M,BLOCK_M) * triton.cdiv(M,BLOCK_M))
     ns_kernel_2[grid](
         a_ptr = matrix,
         out_ptr = out,
@@ -134,7 +156,8 @@ def solve_ns_kernel_2(matrix : torch.Tensor, b : float, c:float, out = torch.Ten
         stride_cm = out.stride(0),
         stride_cn = out.stride(1),
         BLOCK_M = BLOCK_M ,
-        BLOCK_K = BLOCK_K
+        BLOCK_K = BLOCK_K,
+        GROUP_M = GROUP_M
     )
 
 @triton.jit
