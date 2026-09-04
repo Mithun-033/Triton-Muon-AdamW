@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 
@@ -30,7 +31,7 @@ def ns_kernel_1(a_ptr,
     group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
 
     pid_m = first_pid_m + pid % group_size_m 
-    pid_n = (pid % num_pid_n) // group_size_m
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     offset_m = pid_m * BLOCK_M + tl.arange(0,BLOCK_M)
     offset_n = pid_n * BLOCK_M + tl.arange(0,BLOCK_M)
@@ -107,7 +108,7 @@ def ns_kernel_2(a_ptr,
     group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
 
     pid_m = first_pid_m + pid % group_size_m 
-    pid_n = (pid % num_pid_n) // group_size_m
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     offset_m = BLOCK_M * pid_m + tl.arange(0,BLOCK_M)
     offset_n = BLOCK_M * pid_n + tl.arange(0,BLOCK_M)
@@ -137,7 +138,7 @@ def ns_kernel_2(a_ptr,
 
     tl.store(out_ptrs, out, mask = out_mask)
 
-def solve_ns_kernel_2(matrix : torch.Tensor, b : float, c:float, out = torch.Tensor):
+def solve_ns_kernel_2(matrix : torch.Tensor, b : float, c:float, out : torch.Tensor):
     M = matrix.shape[0]
 
     BLOCK_M = 64
@@ -173,15 +174,15 @@ def ns_kernel_3(a_ptr,
         stride_bn,
         stride_cm ,
         stride_cn ,
-        BLOCK_M ,
-        BLOCK_N ,
-        BLOCK_K ,
-        GROUP_M ):
+        BLOCK_M : tl.constexpr ,
+        BLOCK_N : tl.constexpr,
+        BLOCK_K : tl.constexpr,
+        GROUP_M : tl.constexpr):
     '''
     X = (M,N)
-    Compute = aX + out_2 @ X
-    out_2 = bA + cA @ A.T, A = X @ X.T
-    out_2 = (M,M)
+    Compute out = aX + out_2 @ X where,
+    out_2 = bA + cA @ A.T, A = X @ X.T, out_2 = (M,M)
+    out = (M,N)
     '''
     pid = tl.program_id(axis = 0)
     num_pid_m = tl.cdiv(M,BLOCK_M)
@@ -190,10 +191,10 @@ def ns_kernel_3(a_ptr,
 
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_M
-    group_size_m = tl.minimun(GROUP_M, num_pid_m - first_pid_m)
+    group_size_m = tl.minimum(GROUP_M, num_pid_m - first_pid_m)
 
     pid_m = first_pid_m + pid % group_size_m
-    pid_n = (pid % num_pid_n) // group_size_m
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     offset_m = pid_m * BLOCK_M + tl.arange(0,BLOCK_M)
     offset_n = pid_n * BLOCK_N + tl.arange(0,BLOCK_N)
@@ -223,7 +224,7 @@ def ns_kernel_3(a_ptr,
 
     tl.store(out_ptrs, out, mask = mask_x)
 
-def solve_ns_kernel_3(X : torch.Tensor, out_2 : torch.Tensor, a : float, out = torch.Tensor):
+def solve_ns_kernel_3(X : torch.Tensor, out_2 : torch.Tensor, a : float, out : torch.Tensor):
     M,N = X.shape
 
     BLOCK_M = 64
@@ -234,38 +235,51 @@ def solve_ns_kernel_3(X : torch.Tensor, out_2 : torch.Tensor, a : float, out = t
     grid = ((triton.cdiv(M,BLOCK_M)) * triton.cdiv(N,BLOCK_N))
 
     ns_kernel_3[grid](
-        a_ptr = out_2,
-        b_ptr = X,
-        out_ptr = out,
-        a_coeff = a,
-        M = M,
-        N = N,
-        stride_am = X.stride(0),
-        stride_ak = X.stride(1),
-        stride_bk = out_2.stride(0),
-        stride_bn = out_2.stride(1),
-        stride_cm = out.stride(0),
-        stride_cn = out.stride(1),
-        BLOCK_M = BLOCK_M,
-        BLOCK_N = BLOCK_N,
-        BLOCK_K = BLOCK_K,
-        GROUP_M = GROUP_M
-    )
+        a_ptr=out_2,
+        b_ptr=X,
+        out_ptr=out,
+        a_coeff=a,
+        M=M,
+        N=N,
+        stride_am=out_2.stride(0),
+        stride_ak=out_2.stride(1),
+        stride_bk=X.stride(0),
+        stride_bn=X.stride(1),
+        stride_cm=out.stride(0),
+        stride_cn=out.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        GROUP_M=GROUP_M
+)
+
+def newton_shultz_step(X : torch.Tensor, a : float, b : float, c : float, out : torch.Tensor):
+    M,_ = X.shape
+    A = torch.empty((M,M), device=X.device, dtype=X.dtype)
+    out_2 = torch.empty((M,M), device=X.device, dtype=X.dtype)
+
+    solve_ns_kernel_1(X, A)
+    solve_ns_kernel_2(A, b, c, out_2)
+    solve_ns_kernel_3(X, out_2, a, out)
+
+def muon_step(grad : torch.Tensor, momentum : torch.Tensor, a : float, b : float, c : float, lr : float, weight_decay : float, eps : float, out : torch.Tensor):
+    ...
+
+class Muon():
+    def __init__(self, model : nn.Module, coeffs : tuple[float,float,float], beta : float, lr : float, weight_decay : float, eps : float):
+        self.model = model
+        self.a = coeffs[0]
+        self.b = coeffs[1]
+        self.c = coeffs[2]
+
+        self.momentum = {}
+
+        for param in self.model.parameters():
+            self.momentum[param] = torch.zeros_like(param, device=param.device, dtype=param.dtype)
+
+    def step(self):
+        ...        
 
 
 
-@triton.jit
-def muon_step(): ...
 
-
-def solve_muon_step(
-    param: torch.Tensor,
-    gradient: torch.Tensor,
-    momentum: torch.Tensor,
-    weight_decay: float,
-    nesterov: bool,
-    ns_coefficients: tuple[float],
-    ns_step: int,
-    eps: float,
-    lr: float,
-): ...
